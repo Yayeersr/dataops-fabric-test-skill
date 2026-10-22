@@ -1,0 +1,23 @@
+# กำหนดว่า "live DQ gate" ตัวไหนต้องรันตอนไหน — gate = Notebook/Pipeline ที่มี check (Great Expectations)
+# อยู่ข้างใน แล้ว CI สั่งรันจริงบน Fabric ผ่าน REST API และ fail ถ้า item นั้น fail
+# (scripts/run_live_dq_stage.py เป็นตัวอ่านไฟล์นี้ — เพิ่ม gate ใหม่ = เพิ่ม entry ที่นี่ ไม่ต้องแก้ fabric-ci.yml)
+#
+# ต่างจาก check pattern 5 แบบใน ci-config.yml: pattern เหล่านั้นตรวจ "definition" ของ item ก่อน deploy
+# ส่วน live gate ต้องมี item deploy/sync อยู่ใน workspace จริงก่อนถึงรันได้ จึงเป็นอีก job หนึ่งต่างหาก
+#   stage dev     -> job dq-gate-dev     : รันบน PR → staging/main ใน workspace dev  (ก่อน deploy ไป staging)
+#   stage staging -> job dq-gate-staging : รันหลัง deploy-staging ใน workspace staging (ก่อน deploy ไป prod)
+#   stage prod    -> job dq-gate-poc     : รันหลัง deploy-prod ใน workspace prod (ยืนยันหลัง deploy)
+#
+# field ต่อ entry (ชื่อ key = ชื่อ item ใน Fabric):
+#   item_type : notebook | pipeline
+#   stages    : list ของ dev / staging / prod ที่ต้องรัน gate นี้ (workspace ID อ่านจาก workspace-config.yml)
+#
+# ⚠️ ผ่านที่ dev/staging ไม่การันตีว่า prod สะอาด — ควรใส่ครบทั้งสาม stage ถ้า item นั้นอ่านข้อมูลที่มีใน
+#    ทุก environment ส่วน gate ที่ต้องพึ่งข้อมูลเฉพาะ prod ให้ใส่แค่ [prod]
+#
+# ตอนนี้ยังไม่มี gate — ทุก job จะแจ้ง notice ว่าไม่มี gate แล้วผ่านเฉยๆ
+# ตัวอย่าง (item ต้องมี ci-config.yml entry แบบ skip_check ด้วย — ดู tests/live_dq/README.md):
+#
+# nb_<ชื่อ>_dq:
+#   item_type: notebook
+#   stages: [dev, staging, prod]

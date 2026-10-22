@@ -1,0 +1,30 @@
+# กำหนดว่า "endpoint item" ตัวไหน (item ที่ deploy แยกออกไปคนละ workspace จาก
+# pipeline/notebook หลัก) ต้อง deploy ไป workspace ไหนบ้าง ต่อ environment
+#
+# เพิ่ม endpoint item ใหม่ = เพิ่ม entry ที่นี่เท่านั้น ไม่ต้องแก้
+# .github/workflows/fabric-ci.yml เลย — scripts/deploy_endpoints.py เป็นตัวอ่าน config นี้
+# แล้ววน deploy ให้ทุก entry ที่มี target ตรงกับ --environment ที่รันอยู่
+#
+# field ต่อ entry:
+#   item_path : path ของ item folder รวม suffix .<FabricType> (เช่น .Lakehouse) —
+#               relative ต่อ repo_dir ด้านล่าง (ส่งตรงเข้า deploy.py --items-path)
+#   repo_dir  : โฟลเดอร์ repository ที่ item นี้ authored อยู่ (relative ต่อ repo root)
+#               ปกติคือ fabric_items ยกเว้น item ที่มี Git Integration แยกเป็นของตัวเอง
+#               (เช่น fabric_items_endpoint — authored ตรงใน dev-endpoint workspace)
+#   targets   : dict ของ environment -> Fabric workspace ID ปลายทาง
+#               ใส่แค่ environment ที่ item นี้ต้อง deploy จริง ไม่ต้องใส่ครบทุกตัว
+#               key ต้องเป็น dev / staging / prod เป๊ะ (ตรงกับ --environment ใน fabric-ci.yml)
+#
+# entry ที่ไม่มี target ของ environment นั้นจะถูกข้ามเงียบๆ — ถ้ามี endpoint item ควรมี target staging คู่กับ prod ด้วย
+# (deploy-endpoints-staging รันก่อน deploy-prod เสมอ ดู docs/staging-gate.md)
+#
+# ตัวอย่าง (ลบ comment แล้วแก้ชื่อ/GUID ให้ตรงของจริง):
+#
+# lh_endpoint_example:
+#   item_path: lh_endpoint_example.Lakehouse
+#   repo_dir: fabric_items_endpoint
+#   targets:
+#     staging: "<WORKSPACE_ID_ENDPOINT_STAGING>"
+#     prod: "<WORKSPACE_ID_ENDPOINT_PROD>"
+#     # ไม่มี dev target ถ้า item authored อยู่ใน dev-endpoint workspace ผ่าน Git Integration อยู่แล้ว
+#     # (ตัว item ใน repo จะมีหลัง Commit จาก Fabric เท่านั้น)

@@ -1,0 +1,8 @@
+fabric-cicd
+pytest
+great_expectations>=1.0,<2.0
+pandas
+azure-identity
+PyYAML
+# ไม่ต้อง pip install "yq" — ubuntu-latest มี yq (mikefarah) ให้แล้ว ส่วน pip package ชื่อ yq เป็นคนละตัว ติดซ้อนแล้วชนกัน
+# great_expectations pin ที่ 1.x เพราะ scripts/run_data_quality_checkpoint.py ใช้ GX 1.x API (ยังไม่ทดสอบกับ 2.x)

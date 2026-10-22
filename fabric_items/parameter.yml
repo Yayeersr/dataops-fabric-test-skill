@@ -1,0 +1,52 @@
+# fabric-cicd parameter file — remap environment-specific GUIDs ที่ฝังอยู่ในไฟล์ item ตอน deploy
+# อ้างอิง: https://microsoft.github.io/fabric-cicd/latest/config_files/parameter/
+#
+# ปัญหาที่แก้: Notebook ที่ attach Lakehouse ผ่าน Fabric UI จะฝัง lakehouse id + workspace id
+# ของ environment ที่สร้างตอนนั้น (เช่น Dev) ไว้ใน METADATA ของตัวเอง
+# ถ้าไม่ remap ตอน deploy ข้าม environment มันจะยังชี้กลับไปที่ lakehouse ของ Dev อยู่
+# (รันผ่านไม่ error แต่ table ไปโผล่ผิดที่ หรือหาตารางใน environment ปลายทางไม่เจอ)
+#
+# วิธีแก้: ใช้ $items.<type>.<name>.$id ให้ fabric-cicd หา Lakehouse ชื่อเดียวกัน
+# ใน target workspace ของ environment ที่กำลัง deploy อยู่ ณ ตอนนั้นเอง — ไม่ต้อง hardcode
+# GUID ของ staging/prod ล่วงหน้า
+#
+# replace_value ต้องเป็น dictionary เสมอ (fabric-cicd บังคับ) — ใช้ key พิเศษ "_ALL_"
+# เพื่อให้ apply กับทุก environment เหมือนกันหมด (ต้องเป็น key เดียวในนั้นเท่านั้น
+# ถ้ามี env key อื่นปนอยู่ด้วย fabric-cicd จะ validation fail)
+#
+# ไฟล์นี้ว่างเปล่าตั้งใจ — ยังไม่มี item จริงให้ remap จนกว่าจะเชื่อม Fabric Git Integration
+# แล้วมี Notebook ตัวแรกที่ attach Lakehouse เข้ามา ใช้ scripts/generate_parameter.py
+# ช่วย bulk-generate entry จาก metadata ที่ Fabric ฝังไว้ในไฟล์ item ให้อัตโนมัติ
+# (ดู comment ในสคริปต์นั้น) หรือเติมเองตามรูปแบบตัวอย่างด้านล่าง:
+#
+# find_replace:
+#   # default_lakehouse (lakehouse artifact id ของ Dev) + default_lakehouse_workspace_id
+#   - find_value: "<LAKEHOUSE_GUID_ของ_DEV>"
+#     replace_value:
+#       _ALL_: "$items.Lakehouse.<ชื่อ_lakehouse_item>.$id"
+#     item_type: "Notebook"
+#
+#   - find_value: "<WORKSPACE_GUID_ของ_DEV>"
+#     replace_value:
+#       _ALL_: "$workspace.$id"
+#     item_type: "Notebook"
+#
+# --- Environment key: dev / staging / prod เท่านั้น (ต้องตรงกับ --environment ที่ fabric-ci.yml ส่งให้ deploy.py) ---
+# พิมพ์ key ผิด (เช่น "stg") fabric-cicd จะข้าม rule นั้นเงียบๆ ไม่ error
+#
+# --- Endpoint item ที่อยู่คนละ workspace (ดู endpoint-targets.yml) ---
+# `$items.<type>.<name>.$id` หาได้เฉพาะ item ใน workspace เดียวกับที่ deploy อยู่ — ข้าม workspace ไม่ได้
+# ต้อง hardcode GUID ของ endpoint workspace/Lakehouse ต่อ environment และให้ใช้ key เฉพาะ
+# (ไม่ใช้ _ALL_) เพื่อไม่ให้ staging ถูก remap ไปชี้ endpoint ของ prod:
+#
+#   - find_value: "<LAKEHOUSE_GUID_ของ_ENDPOINT_DEV>"
+#     replace_value:
+#       staging: "<LAKEHOUSE_GUID_ของ_ENDPOINT_STAGING>"
+#       prod: "<LAKEHOUSE_GUID_ของ_ENDPOINT_PROD>"
+#     item_type: "Notebook"
+#     item_name: "<ชื่อ_notebook>"
+#
+# ⚠️ GUID ที่ hardcode พังทุกครั้งที่ Lakehouse ถูกสร้างใหม่ — ถ้าเลี่ยงได้ให้ notebook หา item จากชื่อตอนรัน
+# ตรวจโครงสร้างก่อน push: python scripts/debug_parameterization.py --environment staging
+
+find_replace: []

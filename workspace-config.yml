@@ -1,0 +1,17 @@
+# ตั้งค่า Fabric workspace ID ของ environment หลัก (dev/staging/prod) ที่นี่ที่เดียว — ก่อนเริ่มใช้งานจริง
+# (หรือทุกครั้งที่สร้าง workspace ใหม่) แก้ไฟล์นี้ไฟล์เดียว ไม่ต้องไล่หาไล่แก้
+# .github/workflows/fabric-ci.yml / scripts/deploy_local.py เอง
+#
+# หา GUID: เปิด workspace ใน Fabric portal ดูจาก URL (https://app.fabric.microsoft.com/groups/<GUID>/...)
+#
+# ไม่ใช่ secret (แค่ workspace identifier) — commit เข้า repo ได้ปกติ
+#
+# staging บังคับมีเสมอ — job deploy-staging / dq-gate-staging ใน CI อ่านค่านี้ และ staging ควรอยู่บน
+# Fabric Capacity แยกจาก prod (ดู docs/staging-gate.md)
+#
+# หมายเหตุ: นี่คือ workspace ของ fabric_items/ (item หลัก) เท่านั้น — endpoint item
+# (ที่ deploy ข้าม workspace) มี config แยกที่ endpoint-targets.yml
+
+dev: "7a829f6b-4fd1-45c7-8c8e-b7c317816e4b"
+staging: ""   # [DISABLED] ยังไม่มี staging workspace — ดู docs/staging-gate.md
+prod: "84cc9682-9946-44a6-83b4-9275ebfb9834"

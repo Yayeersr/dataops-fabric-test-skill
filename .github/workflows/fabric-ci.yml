@@ -1,0 +1,472 @@
+name: Fabric CI
+
+on:
+  push:
+    branches: [ 'dev', 'main', 'feature/**' ]
+  pull_request:
+    branches: [ 'staging', 'main' ]
+  workflow_dispatch:   # manual trigger ใช้กับ dq-gate-poc เท่านั้น (เช็ค prod ที่มีอยู่ตอนนั้น โดยข้าม deploy)
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # ต้องมีสิทธิ์นี้ถึงจะ comment ตาราง summary ลง PR ได้
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+
+      # ไม่ต้องรู้จัก Fabric item type ทุกตัว — อ่านแค่ "check pattern" ที่ item นั้นแม็ปไว้ใน ci-config.yml
+      # เพิ่ม item type ใหม่ = เพิ่ม entry ใน ci-config.yml เท่านั้น ไม่ต้องแก้ไฟล์นี้
+      #
+      # หา item folder แบบ recursive ผ่านไฟล์ .platform (marker ของ Fabric item จริง) แทนการ glob
+      # fabric_items/*/ ระดับเดียว (scan ทั้ง fabric_items/ และ fabric_items_endpoint/ — 2>/dev/null
+      # เผื่อโฟลเดอร์ใดยังไม่มี) — เพราะ Fabric workspace folder (เช่นโฟลเดอร์ต่อคน/ต่อทีม) ทำให้ item
+      # อยู่ลึกกว่า 1 ชั้นได้ (fabric_items/<folder>/<item>.<Type>/) glob ระดับเดียวจะมองไม่เห็น item เลย
+      - name: Run checks based on declared pattern
+        run: |
+          missing=0
+          while IFS= read -r platform_file; do
+            item="$(dirname "$platform_file")/"
+            folder=$(basename "$item")
+            name="${folder%.*}"
+            fabric_type=$(yq ".${name}.fabric_type // \"${folder##*.}\"" ci-config.yml)
+
+            # opt-out รายตัว ใช้ได้กับทุก pattern — ต้องระบุเหตุผลเสมอ ไม่ปล่อยผ่านแบบเงียบๆ
+            skip=$(yq ".${name}.skip_check // false" ci-config.yml)
+            if [ "$skip" = "true" ]; then
+              reason=$(yq ".${name}.skip_reason // \"NO REASON GIVEN\"" ci-config.yml)
+              if [ "$reason" = "NO REASON GIVEN" ]; then
+                echo "::error::[$name] skip_check=true but skip_reason is missing in ci-config.yml"
+                missing=1
+              else
+                echo "::notice::[$name] check skipped — reason: $reason"
+              fi
+              continue
+            fi
+
+            # ลำดับ: override เฉพาะ item -> default ตาม fabric_type ใน _defaults -> unit_test (fail-safe เข้มสุด)
+            check=$(yq ".${name}.check // \"\"" ci-config.yml)
+            if [ -z "$check" ]; then
+              check=$(yq "._defaults.${fabric_type} // \"unit_test\"" ci-config.yml)
+            fi
+
+            case "$check" in
+              unit_test)
+                if [ ! -f "tests/unit/test_${name}.py" ]; then
+                  echo "::error::[$name] check=unit_test but no test found (expected tests/unit/test_${name}.py)"
+                  missing=1
+                else
+                  pytest "tests/unit/test_${name}.py"
+                fi
+                ;;
+
+              data_quality)
+                if [ ! -f "tests/data_quality/checkpoints/dq_${name}.yml" ]; then
+                  echo "::error::[$name] check=data_quality but no checkpoint found (expected tests/data_quality/checkpoints/dq_${name}.yml)"
+                  missing=1
+                else
+                  # ไม่ใช่ `great_expectations checkpoint run` — GX 1.x ตัด CLI ออกหมดแล้ว
+                  # (ดู docstring ของ scripts/run_data_quality_checkpoint.py)
+                  python scripts/run_data_quality_checkpoint.py "dq_${name}"
+                fi
+                ;;
+
+              structure)
+                if [ ! -f "scripts/validate_pipeline_structure.py" ]; then
+                  echo "::error::[$name] check=structure but scripts/validate_pipeline_structure.py is missing"
+                  missing=1
+                else
+                  python scripts/validate_pipeline_structure.py "$item"
+                fi
+                ;;
+
+              schema)
+                if [ ! -f "scripts/validate_schema_contract.py" ]; then
+                  echo "::error::[$name] check=schema but scripts/validate_schema_contract.py is missing"
+                  missing=1
+                else
+                  python scripts/validate_schema_contract.py "$item"
+                fi
+                ;;
+
+              none)
+                echo "::notice::[$name] check=none — no automated check configured (declared intentionally in ci-config.yml)"
+                ;;
+
+              *)
+                echo "::error::[$name] unknown check pattern '$check' in ci-config.yml"
+                missing=1
+                ;;
+            esac
+          done < <(find fabric_items fabric_items_endpoint -name ".platform" 2>/dev/null | sort)
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::Some items failed required checks — see log above"
+            exit 1
+          fi
+
+      - name: Generate check summary table
+        if: always()
+        run: |
+          pass_count=0
+          fail_count=0
+          skip_count=0
+          rows=""
+
+          while IFS= read -r platform_file; do
+            item="$(dirname "$platform_file")/"
+            folder=$(basename "$item")
+            name="${folder%.*}"
+
+            fabric_type=$(yq ".${name}.fabric_type // \"${folder##*.}\"" ci-config.yml)
+            # ลำดับเดียวกับ step "Run checks based on declared pattern" ด้านบน — ต้องตรงกันเสมอ
+            check=$(yq ".${name}.check // \"\"" ci-config.yml)
+            if [ -z "$check" ]; then
+              check=$(yq "._defaults.${fabric_type} // \"unit_test\"" ci-config.yml)
+            fi
+            skip=$(yq ".${name}.skip_check // false" ci-config.yml)
+
+            if [ "$skip" = "true" ]; then
+              reason=$(yq ".${name}.skip_reason // \"\"" ci-config.yml)
+              status="⏭️ **Skipped** — $reason"
+              skip_count=$((skip_count + 1))
+            else
+              case "$check" in
+                unit_test)
+                  if [ -f "tests/unit/test_${name}.py" ]; then
+                    status="✅ **Pass**"; pass_count=$((pass_count + 1))
+                  else
+                    status="❌ **Missing test**"; fail_count=$((fail_count + 1))
+                  fi
+                  ;;
+                data_quality)
+                  if [ -f "tests/data_quality/checkpoints/dq_${name}.yml" ]; then
+                    status="✅ **Pass**"; pass_count=$((pass_count + 1))
+                  else
+                    status="❌ **Missing checkpoint**"; fail_count=$((fail_count + 1))
+                  fi
+                  ;;
+                structure)
+                  if [ -f "scripts/validate_pipeline_structure.py" ]; then
+                    status="✅ **Pass**"; pass_count=$((pass_count + 1))
+                  else
+                    status="❌ **Missing script**"; fail_count=$((fail_count + 1))
+                  fi
+                  ;;
+                schema)
+                  if [ -f "scripts/validate_schema_contract.py" ]; then
+                    status="✅ **Pass**"; pass_count=$((pass_count + 1))
+                  else
+                    status="❌ **Missing script**"; fail_count=$((fail_count + 1))
+                  fi
+                  ;;
+                none)
+                  status="⏭️ **Skipped** — no check declared (intentional)"
+                  skip_count=$((skip_count + 1))
+                  ;;
+                *)
+                  status="⚠️ **Unknown pattern**"
+                  fail_count=$((fail_count + 1))
+                  ;;
+              esac
+            fi
+
+            rows="${rows}| \`$name\` | $fabric_type | \`$check\` | $status |"$'\n'
+          done < <(find fabric_items fabric_items_endpoint -name ".platform" 2>/dev/null | sort)
+
+          {
+            echo "## 🔍 Fabric Item Check Summary"
+            echo ""
+            if [ "$fail_count" -gt 0 ]; then
+              echo "### ❌ $fail_count check(s) need attention before merge"
+            else
+              echo "### ✅ All checks passing — $pass_count passed, $skip_count skipped"
+            fi
+            echo ""
+            echo "| Item | Fabric Type | Check Pattern | Status |"
+            echo "|---|---|---|---|"
+            printf '%s' "$rows"
+            echo ""
+            echo "<sub>Commit \`${GITHUB_SHA::7}\` · [View full run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})</sub>"
+          } > "$RUNNER_TEMP/check_summary.md"
+
+          # step ถัดไป (post-comment) อ่าน $GITHUB_STEP_SUMMARY ไม่ได้ — เลยเก็บสำเนาไว้ที่ $RUNNER_TEMP ด้วย
+          cat "$RUNNER_TEMP/check_summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post check summary as PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const summaryPath = path.join(process.env.RUNNER_TEMP, 'check_summary.md');
+            const summary = fs.readFileSync(summaryPath, 'utf8');
+            const marker = '<!-- fabric-item-check-summary -->';
+            const body = `${marker}\n${summary}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+  # ลำดับ (gate อยู่ก่อน deploy ไป workspace ถัดไปเสมอ — ดู docs/staging-gate.md):
+  #   test → dq-gate-dev → deploy-staging ─┬─ dq-gate-staging ────────┬─ deploy-prod → dq-gate-poc
+  #                                        ├─ deploy-endpoints-staging ┤
+  #                                        └─ verify-staging-guids     └─ deploy-endpoints (dev/prod)
+  #                                           (รายงาน ไม่บล็อก)
+  # workspace ID ทุกตัวอ่านจาก workspace-config.yml · gate ทุกตัวอ่านจาก dq-gates.yml · endpoint อ่านจาก endpoint-targets.yml
+
+  # Gate 1 (pre-deploy, blocking): ตรวจข้อมูลจริงที่ dev ก่อน merge PR ที่ promote ออกจาก dev
+  # รันเฉพาะ pull_request จึง 'skipped' บน push (ปกติ ไม่ใช่ error) — ถ้าไม่มี gate ใน dq-gates.yml จะผ่านพร้อม notice
+  # ต้องตั้ง required status check "dq-gate-dev" บน staging และ main เอง ไม่งั้นแดงแล้วก็ยัง merge ได้
+  dq-gate-dev:
+    needs: test
+    if: |
+      github.event_name == 'pull_request' &&
+      (github.base_ref == 'staging' || github.base_ref == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: dq-gate-dev-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Run live DQ gates (stage dev, from dq-gates.yml)
+        run: python scripts/run_live_dq_stage.py --stage dev
+        env:
+          FABRIC_CLIENT_ID: ${{ secrets.FABRIC_CLIENT_ID }}
+          FABRIC_CLIENT_SECRET: ${{ secrets.FABRIC_CLIENT_SECRET }}
+          FABRIC_TENANT_ID: ${{ secrets.FABRIC_TENANT_ID }}
+
+  # รัน 2 ครั้งต่อ release โดยตั้งใจ: (1) บน pull_request (gate ก่อน merge)
+  # (2) บน push เข้า main (gate ก่อน deploy-prod ใน run เดียวกัน — ตัวกันของเสียขึ้น prod จริง)
+  # ใช้ `always()` เพราะ dq-gate-dev เป็น 'skipped' เสมอบน push และ GitHub จะ skip job ถัดไปตามโดย default
+  # [STAGING DISABLED] ยังไม่มี staging workspace — `false &&` ทำให้ deploy-staging และ job ที่ needs มัน
+  # (dq-gate-staging, deploy-endpoints-staging, verify-staging-guids) ถูก skip ทั้งหมด
+  # เปิดกลับ: ลบ `false &&` บรรทัดนี้ + ย้อน needs/if ของ deploy-prod และ deploy-endpoints (ดู docs/staging-gate.md)
+  deploy-staging:
+    needs: [test, dq-gate-dev]
+    if: |
+      false &&
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.dq-gate-dev.result == 'success' || needs.dq-gate-dev.result == 'skipped') &&
+      ((github.event_name == 'pull_request' &&
+        (github.base_ref == 'staging' || github.base_ref == 'main')) ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # staging workspace ใบเดียวร่วมกันทุก PR — เข้าคิว ไม่ cancel (cancel กลางคันอาจทิ้ง item ครึ่งๆ กลางๆ)
+    concurrency:
+      group: staging-workspace
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Deploy to Fabric (staging)
+        # --environment ต้องตรงกับ key ใน parameter.yml — ถ้าเพิ่ม rule แยกตาม environment ต้องใช้ "staging" เป๊ะ
+        # ไม่งั้นถูกข้ามเงียบๆ
+        run: |
+          workspace_id=$(yq '.staging' workspace-config.yml)
+          python scripts/deploy.py --workspace "$workspace_id" --environment staging
+        env:
+          FABRIC_CLIENT_ID: ${{ secrets.FABRIC_CLIENT_ID }}
+          FABRIC_CLIENT_SECRET: ${{ secrets.FABRIC_CLIENT_SECRET }}
+          FABRIC_TENANT_ID: ${{ secrets.FABRIC_TENANT_ID }}
+
+  # ตรวจว่า item ที่ deploy เข้า staging ไม่มี GUID ของ Dev ตกค้าง
+  # continue-on-error: true = รายงานอย่างเดียว ยังไม่บล็อก — ถ้ารันนิ่งแล้วให้ลบเพื่อให้เป็น gate จริง
+  # PASS แค่แปลว่าไม่ชี้กลับ Dev ไม่ได้พิสูจน์ว่าชี้ถูกที่ — ดู INFO ใน log ด้วย
+  # (GUID ของ endpoint workspace จะขึ้น INFO — เพิ่ม --allow <GUID> ต่อท้ายคำสั่งเพื่อกันไม่ให้ขึ้นซ้ำ)
+  verify-staging-guids:
+    needs: deploy-staging
+    if: needs.deploy-staging.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Verify no Dev GUIDs leaked into staging
+        run: |
+          dev_id=$(yq '.dev' workspace-config.yml)
+          staging_id=$(yq '.staging' workspace-config.yml)
+          python scripts/verify_deployed_guids.py --source "$dev_id" --target "$staging_id"
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.FABRIC_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.FABRIC_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.FABRIC_TENANT_ID }}
+
+  # Gate ตัวจริง (pre-deploy, blocking): live DQ check กับข้อมูลใน staging ที่เพิ่ง deploy
+  # ต้องตั้งเป็น required status check "dq-gate-staging" บน main ไม่งั้นแดงแล้วก็ยัง merge ได้
+  # ⚠️ ตรวจได้เท่าข้อมูลใน staging — ไม่การันตี prod จึงเก็บ dq-gate-poc ไว้เป็นชั้นยืนยัน
+  dq-gate-staging:
+    needs: deploy-staging
+    if: needs.deploy-staging.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      # บน push ไม่มีเลข PR — ใช้ sha แทน ไม่งั้นทุก push แชร์ group เดียวแล้ว cancel กันเอง
+      group: dq-gate-staging-${{ github.event.pull_request.number || github.sha }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Run live DQ gates (stage staging, from dq-gates.yml)
+        run: python scripts/run_live_dq_stage.py --stage staging
+        env:
+          FABRIC_CLIENT_ID: ${{ secrets.FABRIC_CLIENT_ID }}
+          FABRIC_CLIENT_SECRET: ${{ secrets.FABRIC_CLIENT_SECRET }}
+          FABRIC_TENANT_ID: ${{ secrets.FABRIC_TENANT_ID }}
+
+  # Endpoint item ของ staging — deploy เข้า endpoint workspace ฝั่ง staging ก่อน deploy-prod
+  # อ่านเป้าหมายจาก `targets.staging` ใน endpoint-targets.yml ไม่ต้องแก้ไฟล์นี้เมื่อเพิ่ม endpoint
+  # ถ้าไม่มี target staging สคริปต์จะพิมพ์ notice แล้วจบแบบ no-op
+  deploy-endpoints-staging:
+    needs: deploy-staging
+    if: needs.deploy-staging.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: staging-endpoint-workspace
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Deploy endpoint items (staging, from endpoint-targets.yml)
+        run: python scripts/deploy_endpoints.py --environment staging
+        env:
+          FABRIC_CLIENT_ID: ${{ secrets.FABRIC_CLIENT_ID }}
+          FABRIC_CLIENT_SECRET: ${{ secrets.FABRIC_CLIENT_SECRET }}
+          FABRIC_TENANT_ID: ${{ secrets.FABRIC_TENANT_ID }}
+
+  # needs: dq-gate-dev เป็นแค่การจัดกราฟ — dq-gate-dev 'skipped' เสมอบน push (gate จริงคือ required check ตอน merge PR)
+  # deploy-staging / dq-gate-staging เป็น gate จริงใน run เดียวกัน: ล้มเหลวแล้ว deploy-prod ไม่รัน
+  # ใช้ `always()` + เช็ค result เอง เพราะ GitHub จะ skip job ถัดไปตามถ้า needs ถูก skip
+  deploy-prod:
+    # [STAGING DISABLED] รอแค่ test + dq-gate-dev (ย้อนกลับ: เพิ่ม deploy-staging, dq-gate-staging,
+    # deploy-endpoints-staging กลับเข้า needs และเงื่อนไข result == 'success')
+    needs: [test, dq-gate-dev]
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.dq-gate-dev.result == 'success' || needs.dq-gate-dev.result == 'skipped') &&
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production   # ต้องสร้าง environment นี้ + Required reviewers ก่อน (ดู README ข้อ 6)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Deploy to Fabric (production)
+        run: |
+          workspace_id=$(yq '.prod' workspace-config.yml)
+          python scripts/deploy.py --workspace "$workspace_id" --environment prod
+        env:
+          FABRIC_CLIENT_ID: ${{ secrets.FABRIC_CLIENT_ID }}
+          FABRIC_CLIENT_SECRET: ${{ secrets.FABRIC_CLIENT_SECRET }}
+          FABRIC_TENANT_ID: ${{ secrets.FABRIC_TENANT_ID }}
+
+  # endpoint item (item ที่ deploy แยกไปคนละ workspace จาก pipeline/notebook หลัก) — job เดียวจัดการทุก endpoint
+  # item โดยอ่าน endpoint-targets.yml ผ่าน scripts/deploy_endpoints.py เพิ่ม endpoint ใหม่ = เพิ่ม entry
+  # ในไฟล์นั้นเท่านั้น ไม่ต้องเพิ่ม job (item ใน job นี้ deploy เรียงทีละตัว)
+  #
+  # ไม่ใส่ needs: deploy-prod โดยตั้งใจ ให้รัน parallel กัน — needs ชุดเดียวกับ deploy-prod เพื่อไม่ให้
+  # endpoint ของ prod ขึ้นก่อน gate ผ่าน (บน push เข้า dev ตัว staging gate 'skipped' เสมอ จึงรันได้ปกติ
+  # และ deploy ไป dev endpoint)
+  deploy-endpoints:
+    # [STAGING DISABLED] รอแค่ test + dq-gate-dev (ย้อนกลับ: ดูหมายเหตุที่ deploy-staging)
+    needs: [test, dq-gate-dev]
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (needs.dq-gate-dev.result == 'success' || needs.dq-gate-dev.result == 'skipped') &&
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Deploy endpoint items (from endpoint-targets.yml)
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            ENVIRONMENT=prod
+          else
+            ENVIRONMENT=dev
+          fi
+          python scripts/deploy_endpoints.py --environment "$ENVIRONMENT"
+        env:
+          FABRIC_CLIENT_ID: ${{ secrets.FABRIC_CLIENT_ID }}
+          FABRIC_CLIENT_SECRET: ${{ secrets.FABRIC_CLIENT_SECRET }}
+          FABRIC_TENANT_ID: ${{ secrets.FABRIC_TENANT_ID }}
+
+  # Live DQ gate หลัง deploy (smoke test) — รัน gate stage prod บน workspace prod เพื่อยืนยันของที่เพิ่ง deploy
+  # ไม่ใช่ gate ก่อน deploy (ล้มแล้วของขึ้น prod ไปแล้ว) — ⚠️ ผ่านที่ staging ไม่การันตีว่า prod สะอาด จึงต้องมีทั้งสองตัว
+  # ใช้ `needs.deploy-prod.result == 'success'` ไม่ใช่แค่ needs เพราะ deploy-prod ถูก skip ได้ (เช่น workflow_dispatch)
+  # workflow_dispatch เป็น fallback สั่งเช็คมือ (ข้าม deploy-prod เช็คของที่อยู่ใน prod ตอนนั้น)
+  dq-gate-poc:
+    needs: deploy-prod
+    if: |
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.deploy-prod.result == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Run live DQ gates (stage prod, from dq-gates.yml)
+        run: python scripts/run_live_dq_stage.py --stage prod
+        env:
+          FABRIC_CLIENT_ID: ${{ secrets.FABRIC_CLIENT_ID }}
+          FABRIC_CLIENT_SECRET: ${{ secrets.FABRIC_CLIENT_SECRET }}
+          FABRIC_TENANT_ID: ${{ secrets.FABRIC_TENANT_ID }}

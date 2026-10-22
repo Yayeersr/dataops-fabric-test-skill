@@ -1,0 +1,21 @@
+# TEMPLATE — คัดลอกไฟล์นี้ไปตั้งชื่อใหม่เป็น tests/schema/<ชื่อ item>.yml (ต้องตรงชื่อ
+# Lakehouse/Warehouse item เป๊ะ เหมือน pattern ของ tests/unit/test_<name>.py และ
+# tests/data_quality/checkpoints/dq_<name>.yml) แล้วลบ/แก้ table+column ให้ตรงกับ
+# business schema จริงของ item นั้น — ห้าม copy ไปใช้ทั้งดุ้นโดยไม่แก้
+#
+# ⚠️ เช็คได้แค่ "มี contract ประกาศไว้ไหม + format ถูกไหม" เท่านั้น — ไม่ได้เทียบกับ schema
+# จริงบน Fabric เพราะ Git Integration ของ Lakehouse/Warehouse ไม่ sync ข้อมูล table/column
+# มาให้ (ดู docs/check-patterns-guide.md ส่วนที่ 2 "ข้อจำกัดที่ต้องรู้ก่อนใช้")
+#
+# รันเช็คในเครื่องก่อน push:
+#   python scripts/validate_schema_contract.py "fabric_items/<item folder>/"
+# (ต้องมี trailing slash เหมือนที่ fabric-ci.yml ส่งเข้าไปจริง)
+
+tables:
+  <table_name>:
+    columns:
+      - name: <column_name>
+        type: <string|int|bigint|double|float|boolean|date|timestamp>
+      - name: <column_name_2>
+        type: <...>
+  # เพิ่ม table อื่นในรูปแบบเดียวกันได้ ถ้า Lakehouse/Warehouse นั้นมีหลายตาราง
