@@ -1,0 +1,13 @@
+# Schema contract ของ lh_endpoint (Lakehouse ใน endpoint workspace)
+# เช็คแค่ว่ามี contract + format ถูกต้อง — ไม่ได้เทียบกับ schema จริงบน Fabric
+# (ดู tests/schema/_TEMPLATE.yml) แก้ table/column ให้ตรงกับของจริงเมื่อมี table แล้ว
+
+tables:
+  ci_smoke_test:
+    columns:
+      - name: id
+        type: int
+      - name: created_at
+        type: timestamp
+      - name: note
+        type: string
