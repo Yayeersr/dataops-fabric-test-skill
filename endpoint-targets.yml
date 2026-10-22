@@ -28,3 +28,9 @@
 #     prod: "<WORKSPACE_ID_ENDPOINT_PROD>"
 #     # ไม่มี dev target ถ้า item authored อยู่ใน dev-endpoint workspace ผ่าน Git Integration อยู่แล้ว
 #     # (ตัว item ใน repo จะมีหลัง Commit จาก Fabric เท่านั้น)
+
+lh_endpoint:
+  item_path: lh_endpoint.Lakehouse
+  repo_dir: fabric_items_endpoint
+  targets:
+    prod: "88302912-33a1-4435-bb8a-814b8cbc4808"

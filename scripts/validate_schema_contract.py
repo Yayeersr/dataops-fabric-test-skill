@@ -33,7 +33,7 @@ def _find_repo_root(item_path: str) -> str:
     path = os.path.abspath(item_path)
     while True:
         parent, name = os.path.split(path)
-        if name == "fabric_items":
+        if name in ("fabric_items", "fabric_items_endpoint"):
             return parent
         if parent == path:
             raise RuntimeError(f"could not locate 'fabric_items' ancestor of {item_path}")
